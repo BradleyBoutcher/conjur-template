@@ -1,0 +1,24 @@
+#!/bin/bash 
+
+# 'start' is a developer utility script for setting up an
+# environment to run non-interactive tests against a 
+# running Conjur instance, as well as perform any necessary
+# set-up work
+
+# This guarantees that all commands run within this script will
+# be relative to the `bin` subdirectory 
+cd "$(dirname $0)"
+
+. ./conjur_utils 
+
+# Download conjur-quickstart
+downloadQuickstart
+
+# Setup Conjur containers with a default account of "admin"
+startConjurEnv "admin"
+
+announce "Loading policies..."
+# Add example policy (copied from Conjur Quickstart) to Container
+addPolicies "policy"
+# Load example policy into Conjur
+loadPolicy "root /app/policy/policy.yml"

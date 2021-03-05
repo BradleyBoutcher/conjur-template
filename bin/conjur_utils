@@ -1,0 +1,162 @@
+#!/bin/bash
+
+# A set of utilities for building and running
+# docker-compose commands against a Conjur environment using
+# the Conjur Quickstart project
+
+# Shell colors
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NOCOLOR='\033[0m'
+
+# Used for informing the user of the start of something important
+function announce() {
+  echo -e "${BLUE}"
+  echo =====================================================================
+  echo -e "$1"
+  echo =====================================================================
+  echo -e "${NOCOLOR}"
+}
+
+# Used to inform the user of an action completed without failing
+function success() {
+  echo -e "
+  ✅ ${1}
+  "
+}
+
+# Used to inform the user of an action which has not succeeded
+function fail() {
+  echo -e "
+  ❌ ${1}
+  "
+  exit 1
+}
+
+# Used to inform the user of information that does not inhibit running the environment,
+# but should be known to the user
+function warn() {
+  echo -e "${YELLOW}
+  ⚠️ ${1}
+  ${NOCOLOR}"
+}
+
+# Location of Conjur Quickstart docker-compose file
+# Note: We use an array to avoid issues with string interpolation 
+# across multiple shells, such as bash and zsh
+quickstart=(../conjur-quickstart/docker-compose.yml)
+
+# Used for running docker-compose commands against containers
+# detailed in conjur-quickstart/docker-compose.yml
+conjur_compose="docker-compose -f ${quickstart[@]}"
+
+# Clones Conjur Quickstart repository if it does not already exist, 
+# and pulls images detailed in conjur-quickstart/docker-compose.yml
+function downloadQuickstart() {
+  announce "⇣ Downloading the Conjur Quickstart repository..."
+  if [ -d "${quickstart[@]}" ]; then
+    git clone https://github.com/cyberark/conjur-quickstart.git 
+    success "Done cloning Conjur Quickstart"
+  else
+    success "Conjur Quickstart already downloaded!"
+  fi
+  
+  announce "⇣ Pulling images..."
+  docker-compose -f "${quickstart[@]}" pull
+  success "Done pulling images!"
+}
+
+# Execute a command against the Conjur container directly 
+# Note: use 'conjurctl' to interact with Conjur process running inside container
+function execConjur() {
+  $conjur_compose exec -T conjur bash -c "$1"
+}
+
+# Execute a command against the Conjur CLI container
+# Note: use 'conjur' command to interact with a Conjur endpoint
+function execClient() {
+  $conjur_compose exec -T client bash -c "$1"
+}
+
+# Built-in Conjur command that holds off subsequent execution until Conjur
+# has finished starting up
+function waitForConjur() {
+  execConjur "conjurctl wait -r 30 -p 80"
+}
+
+# Spins up containers detailed in conjur-quickstart/docker-compose.yml
+function composeUpConjur() {
+  announce "🏁 Starting Conjur environment..."
+  export CONJUR_DATA_KEY="WMfApcDBtocRWV+ZSUP3Tjr5XNU+Z2FdBb6BEezejIs="
+  $conjur_compose up -d
+  success "Done setting up Conjur containers!"
+}
+
+# Loads a policy into Conjur for a given account from a given path
+#
+# args:
+#   command: layer and policy file to load, separated by space
+function loadPolicy() {
+  command="${1}"
+  if [ -z "${command}" ]; then
+    fail "Cannot load policy: no layer given"
+  fi
+  execClient "conjur policy load ${command}"  
+  success "Loaded $command!"
+}
+
+# Copies a target file into the Conjur CLI container  
+# args:
+#    local_path: path on local machine to policy files
+#                (will be loaded into /app/policy subdirectory)
+function addPolicies() {
+  local_path="${1}"
+  echo "Copying '$local_path' into Conjur CLI container..."
+  docker cp "$local_path/." "conjur_client:/app/policy"    
+  echo "Done!"
+}
+
+# Removes containers outlined in conjur-quickstart/docker-compose.yml
+function cleanupConjur() {
+  announce "🧹 Cleaning up Conjur environment..."
+  $conjur_compose down
+  success "Conjur environment removed!"
+}
+
+# Creates the containers for a Conjur environment, and performs the necessary
+# set-up work for the Conjur container and Conjur CLI container;
+# Connects Conjur CLI container to a running instance of Conjur, through an
+# NGNIX proxy. Additionally creates a storage directory for policies.
+#
+# args: 
+#   ACCOUNT_NAME: account name for initial conjur user (optional)
+#                 default: admin
+function startConjurEnv() {
+  export ACCOUNT_NAME=$1
+  if [ -z ${ACCOUNT_NAME:=admin} ]; then 
+    warn "No account name provided; defaulting to 'admin'"
+  fi
+
+  composeUpConjur
+
+  waitForConjur
+
+  announce "👤 Creating Conjur account: $ACCOUNT_NAME..."
+  export CONJUR_API_KEY="$(execConjur "conjurctl account create $ACCOUNT_NAME" | tail -1 | awk '{print $NF}' | xargs)"
+  if [ -z $CONJUR_API_KEY ]; then 
+    fail "Unable to retrieve Conjur API Key"
+  fi
+  success "Conjur account created and API Key retrieved!"
+
+  announce "🤝 Initializing CLI..."
+  execClient "yes 'yes' | conjur init -u https://proxy -a $ACCOUNT_NAME"
+  success "Conjur CLI Initialized!"
+
+  announce "🔐 Authenticating..."
+  execClient "conjur authn login -u admin -p $CONJUR_API_KEY"
+  success "Conjur CLI authenticated with Conjur endpoint!"
+
+  announce "Creating Policy subdirectory..."
+  execClient "mkdir -p /app/policy"
+  success "Created '/app/policy'!"
+}
